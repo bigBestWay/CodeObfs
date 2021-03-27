@@ -11,8 +11,13 @@
 本项目完全按照论文
 https://dspace.cvut.cz/bitstream/handle/10467/82300/F8-DP-2019-Turcan-Lukas-thesis.pdf 中《4.1 Lightweight VM Pass》章节设计实现。即将函数中每个BasickBlcok的每一条指令，都分解为一个新的单独的BasicBlock，然后分配一个单独的命令码。将命令码按一定顺序存储起来，让PC通过命令码执行对应的BasicBlock，以此实现一种称之为LigthtWeight VM的混淆，本质上有点类似控制流平坦化。
 # 快速使用
+
+下载llvm官方发布的已编译release版本
 ```
-apt install llvm, clang
+wget https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.1/clang+llvm-11.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+tar xvf clang+llvm-11.0.1-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+cd clang+llvm-11.0.1-x86_64-linux-gnu-ubuntu-16.04
+cp -r * /usr
 ```
 编译.c文件，LightVM.so直接从git仓库中获得
 ```
@@ -28,7 +33,7 @@ add_obf为混淆后文件
 ```
 apt install clang
 ```
-下载llvm 11.0.0源码，解压并进入
+下载llvm 11.0.1源码，解压并进入
 ```
 wget https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.1/llvm-11.0.1.src.tar.xz
 tar xvf llvm-11.0.1.src.tar.xz
