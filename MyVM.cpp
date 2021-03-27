@@ -24,11 +24,11 @@ namespace {
     static char ID;
     MyVMObfuscation() : FunctionPass(ID) {}
 
-    std::string readAnnotate(Function *f) {
+    std::string readAnnotate(Function *f) 
+    {
         std::string annotation = "";
         // Get annotation variable
         GlobalVariable *glob = f->getParent()->getGlobalVariable("llvm.global.annotations");
-
         if (glob != NULL) {
             // Get the array
             if (ConstantArray *ca = dyn_cast<ConstantArray>(glob->getInitializer())) 
@@ -55,7 +55,7 @@ namespace {
                                         {
                                             if (data->isString()) 
                                             {
-                                                annotation += data->getAsString().lower() + " ";
+                                                annotation += data->getAsString().str() + " ";
                                             }
                                         }
                                     }
@@ -83,8 +83,9 @@ namespace {
 
         // If fla annotations
         #define LIGHT_VM "LightVM"
-        if (readAnnotate(&F).find(LIGHT_VM) != std::string::npos) {
-            return true;
+        const std::string & annotation = readAnnotate(&F);
+        if (annotation.find(LIGHT_VM) == std::string::npos) {
+            return false;
         }
         
         std::vector<BasicBlock *> originBBs;
