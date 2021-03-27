@@ -23,6 +23,51 @@ namespace {
   struct MyVMObfuscation : public FunctionPass {
     static char ID;
     MyVMObfuscation() : FunctionPass(ID) {}
+
+    std::string readAnnotate(Function *f) {
+        std::string annotation = "";
+        // Get annotation variable
+        GlobalVariable *glob = f->getParent()->getGlobalVariable("llvm.global.annotations");
+
+        if (glob != NULL) {
+            // Get the array
+            if (ConstantArray *ca = dyn_cast<ConstantArray>(glob->getInitializer())) 
+            {
+                for (unsigned i = 0; i < ca->getNumOperands(); ++i) 
+                {
+                    // Get the struct
+                    if (ConstantStruct *structAn = dyn_cast<ConstantStruct>(ca->getOperand(i))) 
+                    {
+                        if (ConstantExpr *expr = dyn_cast<ConstantExpr>(structAn->getOperand(0)))
+                        {
+                            // If it's a bitcast we can check if the annotation is concerning
+                            // the current function
+                            if (expr->getOpcode() == Instruction::BitCast && expr->getOperand(0) == f) 
+                            {
+                                ConstantExpr *note = cast<ConstantExpr>(structAn->getOperand(1));
+                                // If it's a GetElementPtr, that means we found the variable
+                                // containing the annotations
+                                if (note->getOpcode() == Instruction::GetElementPtr) 
+                                {
+                                    if (GlobalVariable *annoteStr = dyn_cast<GlobalVariable>(note->getOperand(0))) 
+                                    {
+                                        if (ConstantDataSequential *data = dyn_cast<ConstantDataSequential>(annoteStr->getInitializer())) 
+                                        {
+                                            if (data->isString()) 
+                                            {
+                                                annotation += data->getAsString().lower() + " ";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return annotation;
+    }
     
     bool runOnFunction(Function &F) override
     {
@@ -37,7 +82,8 @@ namespace {
         }
 
         // If fla annotations
-        if (readAnnotate(F).find(attr) != std::string::npos) {
+        #define LIGHT_VM "LightVM"
+        if (readAnnotate(&F).find(LIGHT_VM) != std::string::npos) {
             return true;
         }
         
