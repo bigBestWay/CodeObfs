@@ -108,6 +108,10 @@ namespace {
                 }
             }
 
+            //exception handler block不处理
+            if(originBB.isEHPad())
+                continue;
+
             LLVMContext & context = originBB.getContext();
             IRBuilder<> builder(context);
 
