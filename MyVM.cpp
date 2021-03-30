@@ -103,6 +103,9 @@ namespace {
         if (annotation.find(LIGHT_VM) == std::string::npos) {
             return false;
         }
+
+        //在函数的entrybb前插入一个bb用来存放临时变量
+        BasicBlock * fn_new_entry_bb = BasicBlock::Create(F.getContext(), "fn_entry", &F, &F.getEntryBlock());
         
         std::vector<BasicBlock *> toearse_bbs;
         int count = 0;
@@ -129,7 +132,7 @@ namespace {
             }
 
             //exception handler block不处理
-            if(originBB.isEHPad())
+            if(originBB.empty() || originBB.isEHPad())
                 continue;
 
             LLVMContext & context = originBB.getContext();
@@ -221,7 +224,7 @@ namespace {
                         if(!returnval_users.empty())
                         {
                             //在entry新声明一个变量
-                            builder.SetInsertPoint(entry_bb, entry_bb->end());
+                            builder.SetInsertPoint(fn_new_entry_bb, fn_new_entry_bb->end());
                             Value * tmpPtr = builder.CreateAlloca(returnval->getType(), nullptr, "replace");
                             //在new_bb中对此变量赋值, 并将该指令返回值的所有使用处替换为该变量
                             BasicBlock::iterator p = bb->end();
@@ -233,7 +236,6 @@ namespace {
                             {
                                 builder.SetInsertPoint(ele_bb, ele_bb->begin());
                                 Value * replace = builder.CreateLoad(tmpPtr);
-                                //errs() << insn.getParent()->getName() << " " << *returnval << "\n";
 
                                 //获取ele_bb的位置
                                 int ele_bb_id = -1;
@@ -255,7 +257,6 @@ namespace {
                                     {
                                         if(handlerbb_list[j] == I->getParent())
                                         {
-                                            //errs() << "REPLACE " << *handlerbb_list[j] << "\n";
                                             return true;
                                         }
                                     }
@@ -331,6 +332,13 @@ namespace {
         for(auto & bb : toearse_bbs)
         {
             bb->eraseFromParent();
+        }
+
+        //将新entry串进去
+        {
+            IRBuilder<> builder(F.getContext());
+            builder.SetInsertPoint(fn_new_entry_bb, fn_new_entry_bb->end());
+            builder.CreateBr(fn_new_entry_bb->getNextNode());
         }
 
         errs() << F.getName() << " =================== After =======================\n" << F << "\n";
