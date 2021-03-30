@@ -72,7 +72,7 @@ export PATH=$LLVM_HOME/build/bin:$PATH
 //add.c
 #include <stdio.h>
 
-int sum(int * a, int len) __attribute((__annotate__(("LightVM"))))
+int __attribute((__annotate__(("LightVM")))) sum(int * a, int len) //注解
 {
     int result = 0;
     for(int i = 0; i < len; ++i)

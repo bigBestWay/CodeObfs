@@ -68,9 +68,25 @@ namespace {
         }
         return annotation;
     }
+
+    bool isPHINodeBranchInst(Instruction & insn)
+    {
+        if(isa<BranchInst>(insn))
+        {
+            BranchInst * bran_inst = cast<BranchInst>(&insn);
+            for(auto * succ : bran_inst->successors())
+            {
+                auto first_insn = succ->begin();
+                if(isa<PHINode>(*first_insn))
+                    return true;
+            }
+        }
+        return false;
+    }
     
     bool runOnFunction(Function &F) override
     {
+        errs() << F.getName() << " =================== start =======================\n";
         // Check if declaration
         if (F.isDeclaration()) {
             return false;
@@ -88,9 +104,13 @@ namespace {
             return false;
         }
         
-        std::vector<BasicBlock *> originBBs;
+        std::vector<BasicBlock *> toearse_bbs;
+        int count = 0;
         for(BasicBlock &originBB : F) 
         {
+            std::string name = "OriginBB" + std::to_string(count++);
+            originBB.setName(name);
+            errs() << originBB << "\n";
             if(!originBB.empty())
             {
                 //PHI NODE肯定位于block的第一条件指令
@@ -115,16 +135,13 @@ namespace {
             LLVMContext & context = originBB.getContext();
             IRBuilder<> builder(context);
 
-            errs() << "Origin BB: " << originBB << "\n";
-
             //VMInterpreterBody
             BasicBlock * VMInterpreterbody_bb = BasicBlock::Create(context, "VMInterpreterBody", &F, &originBB);
             //VMInterpreter
             BasicBlock * VMInterpreter_bb = BasicBlock::Create(context, "VMInterpreter", &F, VMInterpreterbody_bb);
             //先创建初始化向量表的block
             BasicBlock * entry_bb = BasicBlock::Create(context, "entry", &F, VMInterpreter_bb);
-            originBB.replaceAllUsesWith(entry_bb);
-            
+                        
             std::vector<BasicBlock *> handlerbb_list;
             srand(time(0));
             //PC向量表
@@ -132,7 +149,7 @@ namespace {
             std::vector<Constant*> const_array_elems;
             //为解决变量生命周期问题，为每一条指令都申请一个变量
             std::vector<Value *> var_declare;
-            size_t insn_count = 0;
+            size_t split_bb_num = 0;
 
             while(!originBB.empty())
             {
@@ -144,28 +161,40 @@ namespace {
                     continue;
                 }
 
-                ++ insn_count;
-                BasicBlock * new_bb = BasicBlock::Create(context, "VMInterpreterHandler", &F, &originBB);
-                new_bb->getInstList().splice(new_bb->end(), originBB.getInstList(), first_insn);
-                
-                if(!new_bb->begin()->isTerminator())
+                //对于跳转到PHINODE的指令，不切割成一个单独的bb，放到前一个指令的bb
+                if(isPHINodeBranchInst(*first_insn))
                 {
-                    builder.SetInsertPoint(new_bb, new_bb->end());
-                    builder.CreateBr(VMInterpreterbody_bb);
+                    BasicBlock * bb = *handlerbb_list.rbegin();
+                    //移除上一次添加的br
+                    bb->getTerminator()->eraseFromParent();
+                    bb->getInstList().splice(bb->end(), originBB.getInstList(), first_insn);
+                    bb->replaceSuccessorsPhiUsesWith(&originBB, bb);
                 }
                 else
                 {
-                    new_bb->replaceSuccessorsPhiUsesWith(&originBB, new_bb);
+                    ++ split_bb_num;
+                    BasicBlock * new_bb = BasicBlock::Create(context, "VMInterpreterHandler", &F, &originBB);
+                    new_bb->getInstList().splice(new_bb->end(), originBB.getInstList(), first_insn);
+                    
+                    if(!new_bb->begin()->isTerminator())
+                    {
+                        builder.SetInsertPoint(new_bb, new_bb->end());
+                        builder.CreateBr(VMInterpreterbody_bb);
+                    }
+                    //else
+                    //{
+                    //    new_bb->replaceSuccessorsPhiUsesWith(&originBB, new_bb);
+                    //}
+                    int code = rand();
+                    switch_elems.push_back(ConstantInt::get(Type::getInt32Ty(context), code));
+                    const_array_elems.push_back(ConstantInt::get(Type::getInt32Ty(context), code));
+                    handlerbb_list.push_back(new_bb);
                 }
-
-                int code = rand();
-                switch_elems.push_back(ConstantInt::get(Type::getInt32Ty(context), code));
-                const_array_elems.push_back(ConstantInt::get(Type::getInt32Ty(context), code));
-                handlerbb_list.push_back(new_bb);
             }
 
-            for(BasicBlock * bb : handlerbb_list)
+            for(size_t i = 0; i < handlerbb_list.size(); ++i)
             {
+                BasicBlock * bb = handlerbb_list[i];
                 for(Instruction & insn : *bb)
                 {
                     llvm::Value * returnval = llvm::cast<llvm::Value>(&insn);
@@ -175,13 +204,17 @@ namespace {
                         std::vector<BasicBlock *> returnval_users;
                         for(auto user : returnval->users())
                         {
-                            //找到引用此变量的bb
+                            //找到引用此变量的指令
                             Instruction * insn = llvm::cast<Instruction>(user);
-                            BasicBlock * that_bb = insn->getParent();
-                            //找出不在当前bb的引用
-                            if(that_bb != bb)
+                            //如果该指令不是PHINODE
+                            if(!isa<PHINode>(*insn))
                             {
-                                returnval_users.push_back(that_bb);
+                                BasicBlock * that_bb = insn->getParent();
+                                //找出不在当前bb的引用
+                                if(that_bb != bb)
+                                {
+                                    returnval_users.push_back(that_bb);
+                                }
                             }
                         }
 
@@ -190,7 +223,6 @@ namespace {
                             //在entry新声明一个变量
                             builder.SetInsertPoint(entry_bb, entry_bb->end());
                             Value * tmpPtr = builder.CreateAlloca(returnval->getType(), nullptr, "replace");
-                            errs() << "replace VALUE type :" << *tmpPtr->getType() << "\n";
                             //在new_bb中对此变量赋值, 并将该指令返回值的所有使用处替换为该变量
                             BasicBlock::iterator p = bb->end();
                             --p;
@@ -201,16 +233,53 @@ namespace {
                             {
                                 builder.SetInsertPoint(ele_bb, ele_bb->begin());
                                 Value * replace = builder.CreateLoad(tmpPtr);
-                                returnval->replaceUsesOutsideBlock(replace, bb);
+                                //errs() << insn.getParent()->getName() << " " << *returnval << "\n";
+
+                                //获取ele_bb的位置
+                                int ele_bb_id = -1;
+                                for(size_t j = 0; j < handlerbb_list.size(); ++j)
+                                {
+                                    if(handlerbb_list[j] == ele_bb)
+                                    {
+                                        ele_bb_id = j;
+                                        break;
+                                    }
+                                }
+
+                                returnval->replaceUsesWithIf(replace, [handlerbb_list, ele_bb_id](Use &U) {
+                                    auto *I = dyn_cast<Instruction>(U.getUser());
+                                    if(I == nullptr)
+                                        return true;
+                                    //仅替换当前bb后面bb引用的变量，否则产生BUG!!
+                                    for(size_t j = ele_bb_id; ele_bb_id > 0 && j < handlerbb_list.size(); ++j)
+                                    {
+                                        if(handlerbb_list[j] == I->getParent())
+                                        {
+                                            //errs() << "REPLACE " << *handlerbb_list[j] << "\n";
+                                            return true;
+                                        }
+                                    }
+                                    return false;
+                                });
                             }
                         }
                     }
+
+                    //每次循环都把所有的block打印一遍
+                    /*
+                    errs() << "=======================================\n";
+                    for(size_t j = 0; j < handlerbb_list.size(); ++j)
+                    {
+                        errs() << * handlerbb_list[j] << "\n";
+                    }
+                    errs() << "+++++++++++++++++++++++++++++++++++++++\n";
+                    */
                 }
             }
 
-            originBBs.push_back(&originBB);
+            toearse_bbs.push_back(&originBB);
 
-            ArrayType * array_type = ArrayType::get(Type::getInt32Ty(context), insn_count);
+            ArrayType * array_type = ArrayType::get(Type::getInt32Ty(context), split_bb_num);
             GlobalVariable* opcodes = new llvm::GlobalVariable(*F.getParent(),
                 /*Type=*/array_type,
                 /*isConstant=*/true,
@@ -227,8 +296,9 @@ namespace {
             Value * opcodesGVCast = builder.CreateBitCast(opcodes, Type::getInt32PtrTy(context), "opcodesGVCast");
             builder.CreateStore(opcodesGVCast, opcodesPtr);
             builder.CreateBr(VMInterpreter_bb);
-
-            //errs() << "Processing VMInterpreter\n";
+            //替换originBB前驱后继为entry_bb
+            originBB.replaceAllUsesWith(entry_bb);
+            
             //VMInterpreter
             builder.SetInsertPoint(VMInterpreter_bb);
             //创建变量i并创始化为0
@@ -238,7 +308,6 @@ namespace {
             Value * loadedOpcodePtr = builder.CreateLoad(opcodesPtr, "loadedOpcodePtr");
             builder.CreateBr(VMInterpreterbody_bb);
 
-            //errs() << "Processing VMInterperterBody\n";
             //VMInterperterBody
             builder.SetInsertPoint(VMInterpreterbody_bb);
             Value * loaded_i = builder.CreateLoad(i_alloc, "load_i");
@@ -248,8 +317,8 @@ namespace {
             Value * opcodesIdx = builder.CreateGEP(Type::getInt32Ty(context), loadedOpcodePtr, loaded_i, "opcodesIdx");
             Value * loadedOpcode = builder.CreateLoad(opcodesIdx, "loadedOpcode");
             //创建switch语句
-            SwitchInst * switch_inst = builder.CreateSwitch(loadedOpcode, VMInterpreterbody_bb, insn_count);
-            for(int i = 0; i < insn_count; ++i)
+            SwitchInst * switch_inst = builder.CreateSwitch(loadedOpcode, VMInterpreterbody_bb, split_bb_num);
+            for(int i = 0; i < split_bb_num; ++i)
             {
                 switch_inst->addCase(switch_elems[i], handlerbb_list[i]);
             }
@@ -259,12 +328,12 @@ namespace {
             //errs() << *VMInterpreterbody_bb << "\n";
         }
 
-        for(auto & bb : originBBs)
+        for(auto & bb : toearse_bbs)
         {
             bb->eraseFromParent();
         }
 
-        errs() << "======================= After =======================\n" << F << "\n";
+        errs() << F.getName() << " =================== After =======================\n" << F << "\n";
 
         return false;
     }
