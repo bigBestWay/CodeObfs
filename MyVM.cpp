@@ -13,6 +13,9 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/NoFolder.h"
 #include "llvm/IR/GlobalValue.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
+#include <unistd.h>
+#include <fcntl.h>
 
 using namespace llvm;
 
@@ -82,6 +85,275 @@ namespace {
             }
         }
         return false;
+    }
+
+    void getRandom(void *p, int len)
+    {
+        int fd = open("/dev/urandom", 0);
+        (void)read(fd, p, len);
+        close(fd);
+    }
+
+    int getRandInt32()
+    {
+        int i;
+        getRandom(&i, sizeof(i));
+        return i;
+    }
+
+    int getRandInt16()
+    {
+        short i;
+        getRandom(&i, sizeof(i));
+        return i;
+    }
+
+    /* createAlteredBasicBlock
+     *
+     * This function return a basic block similar to a given one.
+     * It's inserted just after the given basic block.
+     * The instructions are similar but junk instructions are added between
+     * the cloned one. The cloned instructions' phi nodes, metadatas, uses and
+     * debug locations are adjusted to fit in the cloned basic block and
+     * behave nicely.
+     */
+    BasicBlock* createAlteredBasicBlock(BasicBlock * basicBlock, const Twine &  Name = "gen")
+    {
+      // Useful to remap the informations concerning instructions.
+      ValueToValueMapTy VMap;
+      BasicBlock * alteredBB = BasicBlock::Create(basicBlock->getContext(), "junkbb", basicBlock->getParent(), basicBlock);
+      alteredBB->moveAfter(basicBlock);
+
+      for(auto & insn: *basicBlock)
+      {
+          Instruction * clone_insn = insn.clone();
+          alteredBB->getInstList().push_back(clone_insn);
+          VMap[&insn] = clone_insn;
+      }
+
+      // Remap operands.
+      BasicBlock::iterator ji = basicBlock->begin();
+      for (BasicBlock::iterator i = alteredBB->begin(), e = alteredBB->end() ; i != e; ++i){
+        // Loop over the operands of the instruction
+        for(User::op_iterator opi = i->op_begin (), ope = i->op_end(); opi != ope; ++opi){
+          // get the value for the operand
+          Value *v = MapValue(*opi, VMap,  RF_None, 0);
+          if (v != 0){
+            *opi = v;
+          }
+        }
+        // Remap phi nodes' incoming blocks.
+        if (PHINode *pn = dyn_cast<PHINode>(i)) {
+          for (unsigned j = 0, e = pn->getNumIncomingValues(); j != e; ++j) {
+            Value *v = MapValue(pn->getIncomingBlock(j), VMap, RF_None, 0);
+            if (v != 0){
+              pn->setIncomingBlock(j, cast<BasicBlock>(v));
+            }
+          }
+        }
+        // Remap attached metadata.
+        SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+        i->getAllMetadata(MDs);
+        // important for compiling with DWARF, using option -g.
+        i->setDebugLoc(ji->getDebugLoc());
+        ji++;
+      } // The instructions' informations are now all correct
+
+      // add random instruction in the middle of the bloc. This part can be improve
+      for (BasicBlock::iterator i = alteredBB->begin(), e = alteredBB->end() ; i != e; ++i){
+        // in the case we find binary operator, we modify slightly this part by randomly
+        // insert some instructions
+        if(i->isBinaryOp()){ // binary instructions
+          unsigned opcode = i->getOpcode();
+          BinaryOperator *op, *op1 = NULL;
+          Twine *var = new Twine("_");
+          // treat differently float or int
+          // Binary int
+          if(opcode == Instruction::Add || opcode == Instruction::Sub ||
+              opcode == Instruction::Mul || opcode == Instruction::UDiv ||
+              opcode == Instruction::SDiv || opcode == Instruction::URem ||
+              opcode == Instruction::SRem || opcode == Instruction::Shl ||
+              opcode == Instruction::LShr || opcode == Instruction::AShr ||
+              opcode == Instruction::And || opcode == Instruction::Or ||
+              opcode == Instruction::Xor){
+            for(int random = getRandInt32() % 10; random < 10; ++random){
+              switch(getRandInt32() % 4){ // to improve
+                case 0: //do nothing
+                  break;
+                case 1: op = BinaryOperator::CreateNeg(i->getOperand(0),*var,&*i);
+                        op1 = BinaryOperator::Create(Instruction::Add,op,
+                            i->getOperand(1),"gen",&*i);
+                        break;
+                case 2: op1 = BinaryOperator::Create(Instruction::Sub,
+                            i->getOperand(0),
+                            i->getOperand(1),*var,&*i);
+                        op = BinaryOperator::Create(Instruction::Mul,op1,
+                            i->getOperand(1),"gen",&*i);
+                        break;
+                case 3: op = BinaryOperator::Create(Instruction::Shl,
+                            i->getOperand(0),
+                            i->getOperand(1),*var,&*i);
+                        break;
+              }
+            }
+          }
+          // Binary float
+          if(opcode == Instruction::FAdd || opcode == Instruction::FSub ||
+              opcode == Instruction::FMul || opcode == Instruction::FDiv ||
+              opcode == Instruction::FRem){
+            for(int random = getRandInt32() % 10; random < 10; ++random){
+              switch(getRandInt32() % 3){ // can be improved
+                case 0: //do nothing
+                  break;
+                case 1: op = BinaryOperator::CreateFDiv(i->getOperand(0),
+                            i->getOperand(1),*var,&*i);
+                        op1 = BinaryOperator::Create(Instruction::FAdd,op,
+                            i->getOperand(1),"gen",&*i);
+                        break;
+                case 2: op = BinaryOperator::Create(Instruction::FSub,
+                            i->getOperand(0),
+                            i->getOperand(1),*var,&*i);
+                        op1 = BinaryOperator::Create(Instruction::FMul,op,
+                            i->getOperand(1),"gen",&*i);
+                        break;
+              }
+            }
+          }
+          if(opcode == Instruction::ICmp){ // Condition (with int)
+            ICmpInst *currentI = (ICmpInst*)(&i);
+            switch(getRandInt32() % 3){ // must be improved
+              case 0: //do nothing
+                break;
+              case 1: currentI->swapOperands();
+                      break;
+              case 2: // randomly change the predicate
+                      switch(getRandInt32() % 10){
+                        case 0: currentI->setPredicate(ICmpInst::ICMP_EQ);
+                                break; // equal
+                        case 1: currentI->setPredicate(ICmpInst::ICMP_NE);
+                                break; // not equal
+                        case 2: currentI->setPredicate(ICmpInst::ICMP_UGT);
+                                break; // unsigned greater than
+                        case 3: currentI->setPredicate(ICmpInst::ICMP_UGE);
+                                break; // unsigned greater or equal
+                        case 4: currentI->setPredicate(ICmpInst::ICMP_ULT);
+                                break; // unsigned less than
+                        case 5: currentI->setPredicate(ICmpInst::ICMP_ULE);
+                                break; // unsigned less or equal
+                        case 6: currentI->setPredicate(ICmpInst::ICMP_SGT);
+                                break; // signed greater than
+                        case 7: currentI->setPredicate(ICmpInst::ICMP_SGE);
+                                break; // signed greater or equal
+                        case 8: currentI->setPredicate(ICmpInst::ICMP_SLT);
+                                break; // signed less than
+                        case 9: currentI->setPredicate(ICmpInst::ICMP_SLE);
+                                break; // signed less or equal
+                      }
+                      break;
+            }
+
+          }
+          if(opcode == Instruction::FCmp){ // Conditions (with float)
+            FCmpInst *currentI = (FCmpInst*)(&i);
+            switch(getRandInt32() % 3){ // must be improved
+              case 0: //do nothing
+                break;
+              case 1: currentI->swapOperands();
+                      break;
+              case 2: // randomly change the predicate
+                      switch(getRandInt32() % 10){
+                        case 0: currentI->setPredicate(FCmpInst::FCMP_OEQ);
+                                break; // ordered and equal
+                        case 1: currentI->setPredicate(FCmpInst::FCMP_ONE);
+                                break; // ordered and operands are unequal
+                        case 2: currentI->setPredicate(FCmpInst::FCMP_UGT);
+                                break; // unordered or greater than
+                        case 3: currentI->setPredicate(FCmpInst::FCMP_UGE);
+                                break; // unordered, or greater than, or equal
+                        case 4: currentI->setPredicate(FCmpInst::FCMP_ULT);
+                                break; // unordered or less than
+                        case 5: currentI->setPredicate(FCmpInst::FCMP_ULE);
+                                break; // unordered, or less than, or equal
+                        case 6: currentI->setPredicate(FCmpInst::FCMP_OGT);
+                                break; // ordered and greater than
+                        case 7: currentI->setPredicate(FCmpInst::FCMP_OGE);
+                                break; // ordered and greater than or equal
+                        case 8: currentI->setPredicate(FCmpInst::FCMP_OLT);
+                                break; // ordered and less than
+                        case 9: currentI->setPredicate(FCmpInst::FCMP_OLE);
+                                break; // ordered or less than, or equal
+                      }
+                      break;
+            }
+          }
+        }
+      }
+      return alteredBB;
+    } 
+
+    //一元二次方程 ax^2 + bx + c = 0有解的前提是b^2 - 4ac > 0
+    //生成不满足该条件的a,b,c
+    void get_a_b_c(int & a, int & b, int & c)
+    {
+        b = getRandInt16();
+        long bb = b*b;
+        long ac4;
+        do
+        {
+            a = getRandInt16();
+            c = getRandInt16();
+            ac4 = 4*a*c;
+        } while (bb >= ac4);
+    }
+
+    //构建不透明谓词
+    //7y^2 - x^2 != 1
+    //dst原本是src的后继
+    bool insert_opaque_predicate(BasicBlock * src, BasicBlock * dst)
+    {
+        if(src == nullptr || dst == nullptr || dst->empty())
+            return false;
+        
+        auto * terminator = src->getTerminator();
+        if(isa<BranchInst>(terminator))
+        {
+            BranchInst * inst = cast<BranchInst>(terminator);
+            if(inst->isConditional())
+            {
+                return false;
+            }
+        }
+
+        LLVMContext & context = src->getContext();
+        IRBuilder<> builder(context);
+
+        //清除结尾br
+        terminator->eraseFromParent();
+        //创建junk bb
+        BasicBlock * junk_bb = this->createAlteredBasicBlock(dst);
+        
+        //构造不透明谓词
+        builder.SetInsertPoint(src, src->end());
+        int a,b,c;
+        get_a_b_c(a, b, c);
+        Value * con_a = ConstantInt::get(Type::getInt32Ty(context), a);
+        Value * con_b = ConstantInt::get(Type::getInt32Ty(context), b);
+        Value * con_c = ConstantInt::get(Type::getInt32Ty(context), c);
+        Value * con_0 = ConstantInt::get(Type::getInt32Ty(context), 0);
+        //a*x^2+b*x+c==0
+        Value * x = builder.CreateAlloca(Type::getInt32Ty(context), nullptr, "x");
+        builder.CreateLifetimeStart(x);
+        Value * x_load = builder.CreateLoad(x, "x_load");
+        Value * xx = builder.CreateMul(x_load, x_load);
+        Value * axx = builder.CreateMul(xx, con_a);
+        Value * bx = builder.CreateMul(x_load, con_b);
+        Value * add1 = builder.CreateAdd(axx, bx);
+        Value * add2 = builder.CreateAdd(add1, con_c);
+        
+        Value * cmp = builder.CreateCmp(CmpInst::Predicate::ICMP_NE, add2, con_0);
+        builder.CreateLifetimeEnd(x);
+        builder.CreateCondBr(cmp, dst, junk_bb);
+        return true;        
     }
     
     bool runOnFunction(Function &F) override
@@ -160,7 +432,7 @@ namespace {
                 unsigned int insn_opcode = first_insn->getOpcode();
                 if(insn_opcode == Instruction::Alloca) //变量声明不混淆，放在entry
                 {
-                    entry_bb->getInstList().splice(entry_bb->end(), originBB.getInstList(), first_insn);
+                    fn_new_entry_bb->getInstList().splice(fn_new_entry_bb->end(), originBB.getInstList(), first_insn);
                     continue;
                 }
 
@@ -290,10 +562,14 @@ namespace {
             opcodes->setAlignment(MaybeAlign(4));
             opcodes->setInitializer(ConstantArray::get(array_type, const_array_elems));
             errs() << *opcodes << "\n";
+
+            //alloca集中放在入口
+            builder.SetInsertPoint(fn_new_entry_bb, fn_new_entry_bb->end());
+            Value * opcodesPtr = builder.CreateAlloca(Type::getInt32PtrTy(context), nullptr, "opcodesPtr");
+            Value * i_alloc = builder.CreateAlloca(Type::getInt32Ty(context), nullptr, "i_alloc");
             
             //entry
             builder.SetInsertPoint(entry_bb, entry_bb->end());
-            Value * opcodesPtr = builder.CreateAlloca(Type::getInt32PtrTy(context), nullptr, "opcodesPtr");
             Value * opcodesGVCast = builder.CreateBitCast(opcodes, Type::getInt32PtrTy(context), "opcodesGVCast");
             builder.CreateStore(opcodesGVCast, opcodesPtr);
             builder.CreateBr(VMInterpreter_bb);
@@ -303,10 +579,8 @@ namespace {
             //VMInterpreter
             builder.SetInsertPoint(VMInterpreter_bb);
             //创建变量i并创始化为0
-            Value * i_alloc = builder.CreateAlloca(Type::getInt32Ty(context), nullptr, "i_alloc");
             Value * con0 = ConstantInt::get(Type::getInt32Ty(context), 0);
             builder.CreateStore(con0, i_alloc);
-            Value * loadedOpcodePtr = builder.CreateLoad(opcodesPtr, "loadedOpcodePtr");
             builder.CreateBr(VMInterpreterbody_bb);
 
             //VMInterperterBody
@@ -315,11 +589,12 @@ namespace {
             Value * con1 = ConstantInt::get(Type::getInt32Ty(context), 1);
             Value * increased_i = builder.CreateAdd(loaded_i, con1, "increased_i");
             builder.CreateStore(increased_i, i_alloc);
+            Value * loadedOpcodePtr = builder.CreateLoad(opcodesPtr, "loadedOpcodePtr");
             Value * opcodesIdx = builder.CreateGEP(Type::getInt32Ty(context), loadedOpcodePtr, loaded_i, "opcodesIdx");
             Value * loadedOpcode = builder.CreateLoad(opcodesIdx, "loadedOpcode");
             //创建switch语句
             SwitchInst * switch_inst = builder.CreateSwitch(loadedOpcode, VMInterpreterbody_bb, split_bb_num);
-            for(int i = 0; i < split_bb_num; ++i)
+            for(size_t i = 0; i < split_bb_num; ++i)
             {
                 switch_inst->addCase(switch_elems[i], handlerbb_list[i]);
             }
@@ -339,6 +614,23 @@ namespace {
             IRBuilder<> builder(F.getContext());
             builder.SetInsertPoint(fn_new_entry_bb, fn_new_entry_bb->end());
             builder.CreateBr(fn_new_entry_bb->getNextNode());
+        }
+
+        std::vector<BasicBlock *> all_bbs;
+        for(BasicBlock & bb : F)
+        {
+            all_bbs.push_back(&bb);
+        }
+
+        for(auto * bb : all_bbs)
+        {
+            if(rand() % 2 == 0)
+            {
+                if(bb->getTerminator()->getNumSuccessors() == 1)
+                {
+                    insert_opaque_predicate(bb, bb->getSingleSuccessor());
+                }
+            }
         }
 
         errs() << F.getName() << " =================== After =======================\n" << F << "\n";
