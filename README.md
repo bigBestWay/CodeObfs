@@ -111,7 +111,11 @@ gcc -O0 -o add_obf add.o -no-pie
 ![picture 1](images/87336040967362c5096fe0caf415adfb7ffb7bb453ae7944851ed65a82b3247d.png)  
 ![picture 2](images/d0addbff507cece9d2cee4d38bafe9cb43be8f539a489f33e21009162c5a4486.png)  
 
-
+# BUG
+存在会大量抬高栈的缺陷，如果代码本身的循环次数非常大（如十万次），则会可能栈耗尽引起段错误。暂时解决办法：  
+```
+PC电脑的栈空间默认是8M，可通过limit -s设置增大
+```
 # 参考资料
 https://www.praetorian.com/blog/extending-llvm-for-code-obfuscation-part-1/  
 https://dspace.cvut.cz/bitstream/handle/10467/82300/F8-DP-2019-Turcan-Lukas-thesis.pdf  

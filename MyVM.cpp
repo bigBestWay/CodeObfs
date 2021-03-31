@@ -307,7 +307,6 @@ namespace {
     }
 
     //构建不透明谓词
-    //7y^2 - x^2 != 1
     //dst原本是src的后继
     bool insert_opaque_predicate(BasicBlock * src, BasicBlock * dst)
     {
