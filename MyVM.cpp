@@ -323,6 +323,13 @@ namespace {
             }
         }
 
+        //dst如果是phinode也不插
+        auto first = dst->begin();
+        if(isa<PHINode>(&(*first)))
+        {
+            return false;
+        }
+
         LLVMContext & context = src->getContext();
         IRBuilder<> builder(context);
 
