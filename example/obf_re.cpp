@@ -348,17 +348,62 @@ static void hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user
                 }
                 else
                 {
-                    //跳转语句的后半部分不加，因为要换新位置
-                    _insn_str += insn.mnemonic;
-                    _insn_str += " ";
-                    _insn_str += insn.op_str;
-                    _insn_str += ";";
+                    std::string tmp_insnstr;
+                    //mov	rax, qword ptr [rip + 0x2220e6] 语句转换
+                    if(insn.id == X86_INS_MOV)
+                    {
+                        cs_x86 * x86 = &(insn.detail->x86);
+                        if (x86->op_count == 2)
+                        {
+                            cs_x86_op *op1 = &(x86->operands[0]);
+                            cs_x86_op *op2 = &(x86->operands[1]);
+                            if(op1->type == X86_OP_MEM && op1->mem.base == X86_REG_RIP
+                              && op2->type == X86_OP_REG)
+                            {
+                                uint64_t gotentry = insn.address + insn.size + op1->mem.disp;
+                                tmp_insnstr = "mov [";
+                                tmp_insnstr += std::to_string(gotentry) + "],";
+                                tmp_insnstr += cs_reg_name(_handle, op2->reg);
+                                tmp_insnstr += ";";
+                            }
+                            else if(op2->type == X86_OP_MEM && op2->mem.base == X86_REG_RIP
+                                && op1->type == X86_OP_REG)
+                            {
+                                uint64_t gotentry = insn.address + insn.size + op2->mem.disp;
+                                tmp_insnstr = "mov ";
+                                tmp_insnstr += cs_reg_name(_handle, op1->reg);
+                                tmp_insnstr += ",[" + std::to_string(gotentry) + "]";
+                                tmp_insnstr += ";";
+                            }
+                        }
+                    }
+
+                    if(tmp_insnstr.empty())
+                    {
+                        //跳转语句的后半部分不加，因为要换新位置
+                        _insn_str += insn.mnemonic;
+                        _insn_str += " ";
+                        _insn_str += insn.op_str;
+                        _insn_str += ";";
+                    }
+                    else
+                    {
+                        //printf("--- Translate To %s\n", tmp_insnstr.c_str());
+                        _insn_str += tmp_insnstr;
+                    }
                 }
             }
         }
 
         if (insn.id == X86_INS_RET)
 	        uc_emu_stop(_uc);
+
+        //不进入call指令
+        if(insn.id == X86_INS_CALL)
+        {
+            int64_t rip_value = insn.address + insn.size;
+            uc_reg_write(_uc, UC_X86_REG_RIP, &rip_value);
+        }
         
         /*
         if(dispatcher_range_begin == 0)
@@ -458,8 +503,10 @@ static void hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user
 #define STACK_ADDR 0x8000000
 #define STACK_SIZE 16* 1024 * 1024 /* 16M */
 
-void simulate_sub_405EA0(uint64_t address, int size)
+void simulate(uint64_t address, int size)
 {
+    _block_plain_texts.clear();
+    _insn_str.clear();
     //unicorn init
     uc_err err2;
 	if (ELF_CLASS::ELFCLASS32 == _binary->type())
@@ -566,6 +613,67 @@ void rewrite_405EA0()
     assemble(jmpstr, block2_terminator, tmpCode);
     _binary->patch_address(block2_terminator, tmpCode);
     //bb3->bb3
+    jmpstr = "jne " + std::to_string(block3_start);
+    tmpCode.clear();
+    assemble(jmpstr, block3_terminator, tmpCode);
+    _binary->patch_address(block3_terminator, tmpCode);
+}
+
+//4个block
+void rewrite_407b20()
+{
+    if(_block_plain_texts.size() != 4)
+    {
+        printf("rewrite_407b20 block size err %d\n", _block_plain_texts.size());
+        return ;
+    }
+
+    std::string & block1 = _block_plain_texts[0];
+    std::string & block2 = _block_plain_texts[1];
+    std::string & block3 = _block_plain_texts[2];
+    std::string & block4 = _block_plain_texts[3];
+
+    std::vector<uint8_t> block1code, block2code, block3code, block4code;
+    assemble(block1, _free_address, block1code);
+    _binary->patch_address(_free_address, block1code);
+    _free_address += block1code.size();
+    //为末尾的跳转指令预留10字节
+    uint64_t block1_terminator = _free_address;
+    _free_address += 10;
+
+    uint64_t block2_start = _free_address;
+    assemble(block2, block2_start, block2code);
+     _binary->patch_address(block2_start, block2code);
+    _free_address += block2code.size();
+    //为末尾的跳转指令预留10字节
+    uint64_t block2_terminator = _free_address;
+    _free_address += 10;
+
+    uint64_t block3_start = _free_address;
+    assemble(block3, block3_start, block3code);
+     _binary->patch_address(block3_start, block3code);
+    _free_address += block3code.size();
+    //为末尾的跳转指令预留10字节
+    uint64_t block3_terminator = _free_address;
+    _free_address += 10;
+
+    uint64_t block4_start = _free_address;
+    assemble(block4, block4_start, block4code);
+     _binary->patch_address(block4_start, block4code);
+    _free_address += block4code.size();
+
+    //连接各block
+    //bb1 -> bb2
+    std::vector<uint8_t> tmpCode;
+    std::string jmpstr = "jmp " + std::to_string(block2_start);
+    assemble(jmpstr, block1_terminator, tmpCode);
+    _binary->patch_address(block1_terminator, tmpCode);
+    //bb2 -> bb4
+    jmpstr = "je " + std::to_string(block4_start);
+    tmpCode.clear();
+    assemble(jmpstr, block2_terminator, tmpCode);
+    _binary->patch_address(block2_terminator, tmpCode);
+    //bb2->bb3
     jmpstr = "jne " + std::to_string(block3_start);
     tmpCode.clear();
     assemble(jmpstr, block3_terminator, tmpCode);
@@ -799,8 +907,13 @@ void iter2(const std::vector<uint64_t> & funcs)
 	}
 
     //收集dispatcher范围后，模拟执行，将除了dispatcher范围内的指令都打印出来
-    simulate_sub_405EA0(0x405ea0, func2Size[0x405ea0]);
+    simulate(0x405ea0, func2Size[0x405ea0]);
     rewrite_405EA0();
+    printf("++++++++++++++++ 0x405ea0 end\n");
+    simulate(0x407b20, func2Size[0x407b20]);
+    rewrite_407b20();
+    printf("++++++++++++++++ 0x407b20 end\n");
+    simulate(0x4009C0, func2Size[0x4009C0]);
 }
 
 int main(int argc, char * argv[])
@@ -857,7 +970,7 @@ int main(int argc, char * argv[])
     std::string outfile = path + "_patched";
 
     iter1();
-    std::vector<uint64_t> addrs = {0x407B20, 0x405ea0};
+    std::vector<uint64_t> addrs = {0x407B20, 0x405ea0, 0x4009C0};
     iter2(addrs);
 
     _binary->write(outfile);
