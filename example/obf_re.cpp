@@ -913,7 +913,7 @@ void iter2(const std::vector<uint64_t> & funcs)
     simulate(0x407b20, func2Size[0x407b20]);
     rewrite_407b20();
     printf("++++++++++++++++ 0x407b20 end\n");
-    simulate(0x4009C0, func2Size[0x4009C0]);
+    //simulate(0x4009C0, func2Size[0x4009C0]);
 }
 
 int main(int argc, char * argv[])
